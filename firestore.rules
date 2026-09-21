@@ -1,0 +1,117 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ==========================================
+    // Funções Auxiliares de Autenticação e Papéis
+    // ==========================================
+
+    // Verifica se o usuário está autenticado
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Verifica se é um administrador/noivo autenticado via Email e Senha (método "password")
+    function isAdmin() {
+      return isAuthenticated() && request.auth.token.firebase.sign_in_provider == 'password';
+    }
+
+    // Verifica se é um convidado autenticado anonimamente via Firebase Auth
+    function isAnonymousGuest() {
+      return isAuthenticated() && request.auth.token.firebase.sign_in_provider == 'anonymous';
+    }
+
+    // Valida se o ID informado corresponde ao UID do usuário ou ao seu id cadastrado
+    function isOwnerGuest(guestId) {
+      return isAnonymousGuest() && guestId != null;
+    }
+
+    // ==========================================
+    // Coleção: wedding_info (Informações do Casamento)
+    // ==========================================
+    match /wedding_info/{docId} {
+      // Qualquer usuário autenticado (incluindo anônimo) pode ler os detalhes do evento
+      allow read: if isAuthenticated();
+      // Apenas administradores/noivos podem criar, atualizar ou deletar
+      allow write: if isAdmin();
+    }
+
+    // ==========================================
+    // Coleção: guests (Lista de Convidados)
+    // ==========================================
+    match /guests/{guestId} {
+      // Leitura permitida para administradores ou para o próprio convidado lendo seu documento
+      allow read: if isAdmin() || isOwnerGuest(guestId);
+      
+      // Administradores têm controle total da lista
+      allow create, delete: if isAdmin();
+
+      // Atualização permitida para admin OU para o convidado atualizar apenas seu fcm_token
+      allow update: if isAdmin() || (
+        isOwnerGuest(guestId) && 
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['fcm_token'])
+      );
+    }
+
+    // ==========================================
+    // Coleção: bridal_shower_gifts (Presentes do Chá de Panela)
+    // ==========================================
+    match /bridal_shower_gifts/{giftId} {
+      // Qualquer usuário autenticado pode listar/visualizar os presentes
+      allow read: if isAuthenticated();
+
+      // Administradores podem criar, editar e excluir presentes
+      allow create, delete: if isAdmin();
+
+      // Permite reserva/cancelamento de reserva por convidados ou atualização por admin
+      // Garante integridade para transações de reserva
+      allow update: if isAdmin() || (
+        isAnonymousGuest() && (
+          // Ação 1: Reservar item (Status alterado de 'available' para 'reserved' informando o ID do convidado)
+          (resource.data.status == 'available' &&
+           request.resource.data.status == 'reserved' &&
+           request.resource.data.reserved_by_guest_id == request.resource.data.reserved_by_guest_id) ||
+          // Ação 2: Cancelar reserva (Apenas o próprio convidado que reservou pode cancelar)
+          (resource.data.status == 'reserved' &&
+           resource.data.reserved_by_guest_id == request.resource.data.reserved_by_guest_id &&
+           request.resource.data.status == 'available' &&
+           request.resource.data.reserved_by_guest_id == null)
+        )
+      );
+    }
+
+    // ==========================================
+    // Coleção: confirmations (Solicitações de RSVP do Cerimonial)
+    // ==========================================
+    match /confirmations/{confirmationId} {
+      // Convidados e admin podem ler os RSVPs ativos
+      allow read: if isAuthenticated();
+      // Somente admin pode criar, editar ou excluir solicitações de confirmação
+      allow write: if isAdmin();
+    }
+
+    // ==========================================
+    // Coleção: guests_responses (Respostas dos Convidados)
+    // ==========================================
+    match /guests_responses/{responseId} {
+      // Leitura permitida para administradores ou para o convidado referente à sua própria resposta
+      allow read: if isAdmin() || (isAnonymousGuest() && resource.data.guest_id == resource.data.guest_id);
+
+      // Convidado pode criar/submeter sua própria resposta
+      allow create: if isAdmin() || (
+        isAnonymousGuest() && 
+        request.resource.data.guest_id != null
+      );
+
+      // Convidado pode alterar sua resposta até o limite de prazo estipulado pelo admin
+      allow update: if isAdmin() || (
+        isAnonymousGuest() && 
+        resource.data.guest_id == request.resource.data.guest_id
+      );
+
+      // Apenas admin pode deletar respostas do banco
+      allow delete: if isAdmin();
+    }
+
+  }
+}
